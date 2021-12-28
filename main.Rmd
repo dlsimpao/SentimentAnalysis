@@ -1,0 +1,232 @@
+```{r}
+library(tidyverse)
+library(reticulate)
+library(tensorflow)
+library(keras)
+```
+
+```{r}
+reticulate::conda_list()
+```
+
+```{r}
+use_condaenv("tf",required=TRUE)
+```
+
+```{r}
+train = read.csv("train_sent_emo.csv")
+test = read.csv("test_sent_emo.csv")
+```
+
+## Sentiment and Emotion
+### Remove neutral classifications
+```{r}
+rm_neutral <- function(data, sent = TRUE, emo = FALSE){
+  if (sent && !emo){
+    data <- data %>% 
+      select(Utterance, Sentiment) %>% 
+      filter(!(Sentiment=="neutral"))
+    print("Removed neutral classes")
+  } else if (emo && !sent){
+    data <- data %>% 
+      select(Utterance, Emotion) %>% 
+      filter(!(Emotion=="neutral"))
+    print("Removed neutral classes")
+  }else{
+    print("Only select either Emotion or Sentiment")
+  }
+  return(data)
+}
+```
+
+```{r}
+sent_train = rm_neutral(train, sent=TRUE, emo=FALSE)
+sent_test = rm_neutral(test, sent=TRUE, emo=FALSE)
+emo_train = rm_neutral(train, sent=FALSE, emo=TRUE)
+emo_test = rm_neutral(test, sent=TRUE, emo=FALSE)
+sent_train
+```
+
+### Sentiment: Encoding Positive and Negative
+
+```{r}
+sent_train = sent_train %>% 
+  mutate(Sentiment = case_when(
+    Sentiment=="positive" ~ 1,
+    TRUE ~ 0
+  ))
+
+sent_test = sent_test %>% 
+  mutate(Sentiment = case_when(
+    Sentiment=="positive" ~ 1,
+    TRUE ~ 0
+  ))
+
+sent_train
+```
+
+### Emotion: Encoding
+
+```{r}
+emo_train %>% 
+  group_by(Emotion) %>% 
+  summarize(
+    n = n()
+  )
+```
+
+```{r}
+emo_train = emo_train %>% 
+  mutate(Emotion = case_when(
+    Emotion == "anger" ~ 1,
+    Emotion == "disgust" ~ 2,
+    Emotion == "fear" ~ 3,
+    Emotion == "joy" ~ 4,
+    Emotion == "sadness" ~ 5,
+    TRUE ~ 6, #surprise
+  ))
+emo_train
+```
+
+```{r}
+#https://keras.rstudio.com/articles/saving_serializing.html
+library(keras)
+save_model_hdf5(py$model,"lstm.h5")
+
+#not implemented
+#save_model_hdf5(py$model2,"lstm")
+```
+
+```{r}
+#new_model = load_model_hdf5("lstm.h5")
+```
+
+------------------------------------------
+
+```{r}
+load(file="pretrained_models.RData")
+lstm_model = load_model_tf("lstm.h5")
+```
+
+### Creating the embedding layer
+```{r, eval=FALSE}
+
+glove = readLines("glove.6B.50d.txt")
+
+glove = lapply(glove, function(row){strsplit(row,split= " ")}) %>% flatten()
+
+word_to_vec = c()
+
+for(i in 1:length(glove)){
+  row = glove[[i]]
+  word_to_vec[row[1]] <- list( row[3:length(row)-1] )
+}
+
+word_to_vec[["the"]]
+```
+
+```{r}
+adapt_data = sent_train$Utterance
+
+tokenizer = text_tokenizer(num_words = 1000)
+
+fit_text_tokenizer(tokenizer,adapt_data)
+
+words_to_index = tokenizer$index_word
+
+```
+
+```{r,eval=FALSE}
+vocab_len = length(words_to_index)
+vec_len = length(word_to_vec[["the"]])
+emb_matrix = matrix(0, nrow=vocab_len , ncol=vec_len, dimnames = list(1:vocab_len))
+```
+
+```{r, eval=FALSE}
+index = 1
+for(word in words_to_index){
+  embedding_vector = word_to_vec[[word]]
+  if(!is.null(embedding_vector)){
+    emb_matrix[index,] = word_to_vec[[word]]
+  }
+  index = index + 1
+}
+
+```
+
+```{r}
+embedding_layer = layer_embedding(input_dim=vocab_len,
+                                  output_dim=vec_len,
+                                  input_length = MAXLEN,
+                                  weights = list(emb_matrix),
+                                  trainable = FALSE)
+```
+
+### LSTM model
+```{r}
+#https://www.r-bloggers.com/2019/01/how-to-prepare-data-for-nlp-text-classification-with-keras-and-tensorflow/
+MAXLEN = 72
+max_features = 1000
+embedding_dims = 50
+
+model = keras_model_sequential() %>% 
+  embedding_layer() %>% 
+  layer_lstm(units=128, dropout = 0.6, return_sequences = TRUE) %>% 
+  layer_lstm(units=128, dropout = 0.6, return_sequences = TRUE) %>% 
+  layer_lstm(units=128) %>% 
+  layer_dense(units=1, activation="sigmoid")
+```
+
+```{r}
+model = compile(model, loss = "binary_crossentropy", optimizer="adam", metrics="accuracy")
+
+
+
+X_train_tokens = texts_to_sequences(tokenizer,sent_train$Utterance) %>% 
+            pad_sequences(maxlen = 72, padding="post")
+X_test_tokens = texts_to_sequences(tokenizer,sent_test$Utterance) %>% 
+            pad_sequences(maxlen = 72, padding="post")
+
+model %>% fit(X_train_tokens, sent_train$Sentiment,
+              batch_size=32, epochs=15,
+              validation_data=list(X_test_tokens,sent_test$Sentiment))
+```
+
+```{r}
+new_tokenized_string = 
+  texts_to_sequences(tokenizer,"Happy great fun nice") %>% 
+            pad_sequences(maxlen = 72, padding="post")
+
+
+predict(model,new_tokenized_string) %>% as.numeric()
+```
+
+### Save R objects
+```{r}
+model %>% save_model_tf("models/lstm.h5")
+```
+
+```{r}
+summary(model)
+```
+
+```{r}
+save(sent_train, #training data
+     emb_matrix, #weights
+     vocab_len, #dim
+     vec_len, #dim
+     MAXLEN, #max input sequence
+     file="main_partials.RData")
+
+save(word_to_vec, file="Word_to_vec.RData")
+save(emb_matrix, file="MELD_emb_matrix.RData")
+```
+
+```{r}
+save.image(file="main_all.RData")
+```
+
+### CNN model - better for shorter sentences
+```{r}
+
+```

@@ -1,0 +1,183 @@
+```{r}
+library(tidyverse)
+library(reticulate)
+library(tensorflow)
+library(keras)
+
+#https://stackoverflow.com/q/35999874
+library(stopwords)
+library(quanteda)
+```
+
+
+
+```{r}
+use_condaenv("tf",required=TRUE)
+```
+
+```{r}
+#https://tensorflow.rstudio.com/guide/keras/examples/imdb_cnn/
+```
+
+# IMDB
+```{r}
+max_features <- 5000
+MAXLEN = 400
+
+imdb = dataset_imdb(num_words=max_features)
+
+xtrain = imdb$train$x %>% 
+  pad_sequences(maxlen=MAXLEN)
+
+xtest = imdb$test$x %>% 
+  pad_sequences(maxlen=MAXLEN)
+
+ytrain = imdb$train$y
+ytest = imdb$test$y
+```
+
+```{r}
+hist(ytrain)
+```
+# Creating the embedding layer  
+
+```{r}
+load("IMDB_emb_matrix.RData")
+```
+
+```{r,eval=FALSE}
+load("Word_to_vec.RData")
+vocab_len = length(dataset_imdb_word_index())
+vec_len = length(word_to_vec[["the"]])
+emb_matrix = matrix(0, nrow=vocab_len , ncol=vec_len, dimnames = list(1:vocab_len))
+```
+
+```{r, eval=FALSE}
+index = 1
+for(word in names(dataset_imdb_word_index())){
+  embedding_vector = word_to_vec[[word]]
+  if(!is.null(embedding_vector)){
+    emb_matrix[index,] = word_to_vec[[word]]
+  }
+  index = index + 1
+}
+
+```
+
+```{r}
+vocab_len = length(dataset_imdb_word_index())
+vec_len = 49
+MAXLEN <- 400
+
+embedding_layer = layer_embedding(input_dim=vocab_len,
+                                  output_dim=vec_len,
+                                  input_length = MAXLEN,
+                                  weights = list(emb_matrix),
+                                  trainable = FALSE)
+```
+
+```{r, eval=FALSE}
+#Model adapted from
+#https://tensorflow.rstudio.com/guide/keras/examples/imdb_cnn/
+
+batch_size <- 32
+embedding_dims <- 50
+filters <- 250
+kernel_size <- 3
+hidden_dims <- 250
+epochs <- 2
+
+model = keras_model_sequential() %>%
+  embedding_layer() %>% 
+  layer_dropout(0.2) %>% 
+  layer_conv_1d(filters = 250, kernel_size = 3, padding='valid', activation='relu', strides=1) %>% 
+  layer_max_pooling_1d() %>%
+  layer_dense(hidden_dims) %>% 
+  layer_dropout(0.2) %>%
+  layer_activation("relu") %>% 
+  layer_dense(units=1, activation="sigmoid")
+```
+
+```{r}
+model = keras_model_sequential() %>%
+  embedding_layer() %>%
+  layer_conv_1d(filters = 32, kernel_size = 3, padding='valid', activation='relu') %>% 
+  layer_max_pooling_1d() %>%
+  layer_dropout(0.6) %>% 
+  layer_flatten() %>% 
+  layer_dense(units=250, activation="relu") %>% 
+  layer_dense(units=1, activation="sigmoid")
+```
+
+```{r}
+batch_size = 32
+
+# Try using different optimizers and different optimizer configs
+model %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+
+model %>% fit(
+  xtrain, ytrain,
+  batch_size = batch_size,
+  epochs = 15,
+  validation_data = list(xtest, ytest)
+)
+```
+
+```{r}
+scores <- model %>% evaluate(
+  xtest, ytest,
+  batch_size = batch_size
+)
+
+cat('Test score:', scores[[1]])
+cat('Test accuracy', scores[[2]])
+```
+
+## create words_to_sequence
+```{r}
+dataset_imdb_word_index()["fawn"]
+
+#  emb_matrix = matrix(0, nrow=vocab_len , ncol=vec_len, dimnames = list(1:vocab_len))
+
+#maps words in a sentence to an integer; results in a sequence
+sentence_to_sequence = function(word_to_index, sentence){
+  words = str_split(sentence, " ")[[1]]
+  
+  sequence = matrix(0, nrow=1,ncol=length(words)) 
+  #nrow=1; we're assuming one line of string
+  
+  for(i in seq_along(words)){
+    #if word exists in word_to_index, get index
+    if(words[i] %in% names(word_to_index)){
+      sequence[1,i] = word_to_index[[words[i]]]
+    }
+  }
+  
+  return(sequence)
+}
+
+new_sentence = "Hello, I need help"
+new_vector = sentence_to_sequence(dataset_imdb_word_index(), new_sentence)
+
+new_vector %>% pad_sequences(maxlen = 72, padding="post")
+```
+
+```{r}
+save_model_tf(model, file="models/IMDB_cnn.h5")
+save(dataset_imdb_word_index,
+     vocab_len,
+     vec_len,
+     MAXLEN,
+     sentence_to_sequence, file = "IMDB_cnn_dep.RData")
+save(emb_matrix, file="IMDB_emb_matrix.RData")
+```
+
+
+```{r}
+summary(model)
+```

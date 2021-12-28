@@ -1,0 +1,177 @@
+```{r}
+library(tidyverse)
+library(reticulate)
+library(tensorflow)
+library(keras)
+
+#https://stackoverflow.com/q/35999874
+library(stopwords)
+library(quanteda)
+```
+
+
+
+```{r}
+use_condaenv("tf",required=TRUE)
+```
+
+```{r}
+#https://github.com/rstudio/keras/blob/master/vignettes/examples/imdb_lstm.R
+```
+
+# MELD dataset
+```{r}
+maxlen = 80
+
+train = read.csv("train_sent_emo.csv")
+test = read.csv("test_sent_emo.csv")
+
+train = train %>% filter(Sentiment != "neutral")
+test = test %>% filter(Sentiment != "neutral")
+
+xtrain = train$Utterance
+xtest = test$Utterance
+```
+
+```{r, eval=FALSE}
+ytrain = train %>% 
+  mutate(Sentiment = case_when(
+    Sentiment == "positive" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  transmute(Sentiment) %>% pull()
+
+ytest = test %>% 
+  mutate(Sentiment = case_when(
+    Sentiment == "positive" ~ 1,
+    TRUE ~ 0
+  )) %>% 
+  transmute(Sentiment) %>% pull()
+```
+
+```{r}
+hist(ytrain)
+```
+
+### Remove stopwords before tokenizing
+```{r}
+#Adding and remove stopwords
+#https://www.rdocumentation.org/packages/stopwords/versions/2.3
+stopwords_en = stopwords::stopwords() %>% 
+  char_remove(pattern = ("not"))
+
+#filters = "!\"#$%&()*+,-./:;<=>?@[\\]^_`{|}~\t\n"
+
+rm_sw = function(sentence){
+  words = str_split(sentence," ")[[1]]
+  words = char_remove(words, pattern = stopwords_en)
+  
+  sentence = paste(words, collapse = " ")
+  return(sentence)
+}
+rm_sw("Hello, I need help! me our we stop")
+```
+
+```{r}
+xtrain = lapply(xtrain,function(row) rm_sw(row)) %>% unlist()
+xtest = lapply(xtest, function(row) rm_sw(row)) %>% unlist()
+```
+
+### Text to Sequences
+```{r}
+MAXLEN = 70
+
+tokenizer = text_tokenizer(num_words = 4000)
+
+fit_text_tokenizer(tokenizer, xtrain)
+
+words_to_index = tokenizer$index_word
+
+X_train_tokens = texts_to_sequences(tokenizer,xtrain) %>% 
+            pad_sequences(maxlen = MAXLEN, padding="post")
+
+X_test_tokens = texts_to_sequences(tokenizer,xtest) %>% 
+            pad_sequences(maxlen = MAXLEN, padding="post")
+```
+
+#Recreate embedding matrix for clean MELD dataset (really long time)
+
+```{r, eval=FALSE}
+load("MELD_word_to_vec.RData")
+```
+
+```{r,eval=FALSE}
+vocab_len = length(words_to_index)
+vec_len = length(word_to_vec[["the"]])
+emb_matrix = matrix(0, nrow=vocab_len , ncol=vec_len, dimnames = list(1:vocab_len))
+```
+
+```{r, eval=FALSE}
+index = 1
+for(word in words_to_index){
+  embedding_vector = word_to_vec[[word]]
+  if(!is.null(embedding_vector)){
+    emb_matrix[index,] = word_to_vec[[word]]
+  }
+  index = index + 1
+}
+
+```
+
+
+# Load embedding matrix for MELD dataset
+```{r}
+vocab_len = length(words_to_index)
+vec_len = 49
+
+embedding_layer = layer_embedding(input_dim=vocab_len,
+                                  output_dim=vec_len,
+                                  input_length = MAXLEN,
+                                  weights = list(emb_matrix),
+                                  trainable = FALSE)
+```
+
+```{r}
+#Model adapted from
+#https://medium.com/voice-tech-podcast/text-classification-using-cnn-9ade8155dfb9
+
+#kernel_regularizer = regularizer_l1(0.01)
+
+model = keras_model_sequential() %>%
+  embedding_layer() %>%
+  layer_conv_1d(filters = 32, kernel_size = 3, padding='same', activation='relu') %>% 
+  layer_max_pooling_1d() %>%
+  layer_dropout(0.6) %>% 
+  layer_flatten() %>% 
+  layer_dense(units=250, activation="relu") %>% 
+  layer_dense(units=1, activation="sigmoid")
+```
+
+```{r}
+batch_size = 32
+
+# Try using different optimizers and different optimizer configs
+model %>% compile(
+  loss = 'binary_crossentropy',
+  optimizer = 'adam',
+  metrics = c('accuracy')
+)
+
+
+model %>% fit(
+  X_train_tokens, ytrain,
+  batch_size = batch_size,
+  epochs = 15,
+  validation_data = list(X_test_tokens, ytest)
+)
+```
+
+```{r}
+scores <- model %>% evaluate(
+  X_test_tokens, ytest,
+  batch_size = batch_size
+)
+
+cat('Test score:', scores[[1]])
+cat('Test accuracy', scores[[2]])
+```
